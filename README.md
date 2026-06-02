@@ -121,6 +121,35 @@ npx @softeria/ms-365-mcp-server --preset mail --list-permissions
 
 This is useful for enterprise environments where Graph API permissions must be pre-approved and admin-consented before deploying a new version.
 
+The `--list-permissions` JSON includes:
+
+- `toolPermissions`: permissions implied by the tool surface before `--allowed-scopes` filtering
+- `effectivePermissions`: permissions implied by the tools that remain enabled after `--allowed-scopes`
+- `permissions`: legacy alias for `effectivePermissions`, kept for compatibility with existing scripts
+- `allowedScopes`: the configured scope allowlist, when provided
+- `disabledTools`: tools hidden because their required Graph scopes are not covered by `allowedScopes`
+- `missingAllowedScopesForTools`: unique missing scopes across disabled tools
+- `extraAllowedScopesNotUsedByTools`: allowed scopes that are not used by the current tool surface
+
+### Allowed Scopes
+
+By default, MSAL requests the scopes implied by the enabled tools, and the tool surface is controlled by `--enabled-tools`, `--preset`, `--org-mode`, and `--read-only`.
+
+Enterprise and headless deployments can add a scope boundary with `--allowed-scopes` or `MS365_MCP_ALLOWED_SCOPES`. When configured, the server first computes the normal tool surface, then hides Graph tools whose required scopes are not covered by the allowlist. OAuth metadata and login flows request only the effective permissions for the tools that remain enabled.
+
+```bash
+npx @softeria/ms-365-mcp-server \
+  --org-mode \
+  --enabled-tools '^(list-mail-messages|get-mail-message|list-drives|get-drive-item|download-bytes)$' \
+  --allowed-scopes 'User.Read Mail.Read Files.Read'
+```
+
+CLI value takes precedence over `MS365_MCP_ALLOWED_SCOPES`; if neither is set, the default tool-derived scope behavior is unchanged. Supplying an empty value fails at startup so deployments do not accidentally fall back to a wider tool surface.
+
+Scope coverage is hierarchy-aware: for example, `Mail.ReadWrite` covers tools that require `Mail.Read`, and `Files.ReadWrite.All` covers tools that require `Files.Read`.
+
+In HTTP mode, OAuth discovery advertises the effective filtered permissions so clients request the same consent surface. On-Behalf-Of mode (`--obo`) still advertises `api://<clientId>/access_as_user` for protected-resource metadata; `--allowed-scopes` does not override OBO.
+
 ## Organization/Work Mode
 
 To access work/school features (Teams, SharePoint, etc.), enable organization mode using any of these flags:
@@ -438,6 +467,32 @@ npx @softeria/ms-365-mcp-server --list-accounts
 - **100% backward compatible**: existing single-account setups work unchanged.
 - The `account` parameter accepts email address (e.g. `user@outlook.com`) or MSAL `homeAccountId`.
 
+### Strict Account Pinning
+
+Headless stdio deployments can pin the local MSAL cache to one expected Microsoft account:
+
+```bash
+# Username matching is case-insensitive
+MS365_MCP_EXPECTED_USERNAME=work@company.com npx @softeria/ms-365-mcp-server --login
+
+# Or pin the exact MSAL homeAccountId shown by --list-accounts
+npx @softeria/ms-365-mcp-server --expected-home-account-id <homeAccountId> --login
+```
+
+Use `--list-accounts` to discover `homeAccountId` values. The MCP `list-accounts` tool intentionally hides account IDs, so use the CLI for exact ID pinning.
+
+Pinning is opt-in and local-MSAL only:
+
+- CLI values (`--expected-username`, `--expected-home-account-id`) take precedence over `MS365_MCP_EXPECTED_USERNAME` and `MS365_MCP_EXPECTED_HOME_ACCOUNT_ID`.
+- Supplying an empty pin value fails at startup instead of being ignored.
+- Username pins are compared case-insensitively; `homeAccountId` pins are exact.
+- If both pins are set, they must resolve to the same cached account.
+- Local stdio startup fails fast when the expected account is not in the token cache. Bootstrap by setting the pin, running `--login`, then starting the headless server.
+- Device-code and browser logins reject a missing or mismatched account before persisting the selected account or token cache.
+- Pinning collapses the effective MCP mode to single-account: the server does not advertise an `account` parameter and MCP instructions do not suggest account switching.
+- `--http`, `--obo`, and `MS365_MCP_OAUTH_TOKEN` use request-provided tokens for Graph calls, so account pins are warning-only in those modes. If HTTP auth tools are enabled, the pin still applies to those local MSAL helper flows.
+- `--logout` clears all cached accounts, including the pinned account. For surgical cleanup, prefer `--remove-account <id>`.
+
 > **For MCP multiplexers (Legate, Governor):** Multi-account mode replaces the N-process pattern. Instead of spawning one server per account, a single instance handles all accounts via the `account` parameter, reducing tool duplication from N×110 to 110.
 
 ## Tool Presets
@@ -469,11 +524,14 @@ The following options can be used when running ms-365-mcp-server directly from t
 --login           Login using device code flow
 --logout          Log out and clear saved credentials
 --verify-login    Verify login without starting the server
---list-permissions List all required Graph API permissions and exit (respects --org-mode, --preset, --enabled-tools)
+--list-permissions List required Graph API permissions and exit (respects --org-mode, --preset, --enabled-tools, --allowed-scopes)
 --org-mode        Enable organization/work mode from start (includes Teams, SharePoint, etc.)
 --work-mode       Alias for --org-mode
 --force-work-scopes Backwards compatibility alias for --org-mode (deprecated)
 --cloud <type>    Microsoft cloud environment: global (default) or china (21Vianet)
+--allowed-scopes <scopes> Limit exposed tools to Graph scopes covered by this allowlist
+--expected-username <username> Require local MSAL auth to use this account username
+--expected-home-account-id <id> Require local MSAL auth to use this exact homeAccountId
 ```
 
 ### Server Options
@@ -513,6 +571,10 @@ Environment variables:
 - `MS365_MCP_KEYVAULT_URL`: Azure Key Vault URL for secrets management (see Azure Key Vault section)
 - `MS365_MCP_TOKEN_CACHE_PATH`: Custom file path for MSAL token cache (see Token Storage below)
 - `MS365_MCP_SELECTED_ACCOUNT_PATH`: Custom file path for selected account metadata (see Token Storage below)
+- `MS365_MCP_AUTH_CACHE_COMMAND`: External executable wrapper for provider-neutral auth-cache storage (see Token Storage below)
+- `MS365_MCP_AUTH_CACHE_COMMAND_TIMEOUT_MS`: Per-invocation timeout for `MS365_MCP_AUTH_CACHE_COMMAND` (default: `10000`)
+- `MS365_MCP_EXPECTED_USERNAME`: Require local MSAL auth to use this Microsoft account username (case-insensitive; CLI flag takes precedence)
+- `MS365_MCP_EXPECTED_HOME_ACCOUNT_ID`: Require local MSAL auth to use this exact MSAL homeAccountId (CLI flag takes precedence)
 
 ## Token Storage
 
@@ -532,6 +594,42 @@ Parent directories are created automatically. Files are written with `0600` perm
 > **Security note**: File-based token storage writes sensitive credentials to disk. Ensure the chosen directory has appropriate access controls. The OS credential store (keytar) is preferred when available.
 
 > **Hosted/sandboxed environments** (e.g. Anthropic Cowork): Set `MS365_MCP_TOKEN_CACHE_PATH` and `MS365_MCP_SELECTED_ACCOUNT_PATH` to a persistent mount so tokens survive between sessions.
+
+### External auth-cache command
+
+Headless local-MSAL deployments can replace the built-in keytar/file storage with a provider-neutral external command:
+
+```bash
+export MS365_MCP_AUTH_CACHE_COMMAND="/path/to/ms365-auth-cache-store"
+export MS365_MCP_AUTH_CACHE_COMMAND_TIMEOUT_MS=10000
+```
+
+When `MS365_MCP_AUTH_CACHE_COMMAND` is set for a local auth flow, the server uses only that command for the MSAL token cache and selected-account metadata. It does not fall back to keytar or local files. If the command path is missing, not executable on POSIX, exits non-zero, times out, or returns malformed data, auth-cache operations fail closed with a sanitized error message.
+
+The value must be a real executable wrapper path. It is not a shell command string, and there is no companion args environment variable. Put any interpreter, region, profile, or provider-specific settings inside the wrapper. Windows users should point the variable at a wrapper executable or script that can be launched directly by Node without shell parsing.
+
+The server invokes the wrapper with:
+
+```text
+$MS365_MCP_AUTH_CACHE_COMMAND load token-cache
+$MS365_MCP_AUTH_CACHE_COMMAND save token-cache
+$MS365_MCP_AUTH_CACHE_COMMAND delete token-cache
+$MS365_MCP_AUTH_CACHE_COMMAND load selected-account
+$MS365_MCP_AUTH_CACHE_COMMAND save selected-account
+$MS365_MCP_AUTH_CACHE_COMMAND delete selected-account
+```
+
+Protocol v1:
+
+- `load <key>` reads no stdin. Exit `0` with `{"found":true,"value":"<stored envelope string>"}` when present. A miss is exit `0` with `{"found":false}` or empty stdout.
+- `save <key>` receives `{"value":"<stamped envelope string>"}` on stdin and must exit `0` only after the value is durably committed. There are no fire-and-forget or coalesced saves in v1.
+- `delete <key>` reads no stdin and exits `0` whether the key existed or not.
+- `<key>` is `token-cache` or `selected-account`.
+- Any non-zero exit is a storage error. Do not use exit code `2` for cache misses.
+- Stderr is captured and truncated in sanitized errors. Stdin and stdout payloads are never logged by the server.
+- Token-cache payloads can be large; wrappers should handle at least 256 KB values.
+
+Normal stateless HTTP Graph requests do not use local auth-cache storage. In HTTP mode, command storage is skipped at startup and per request unless local auth tools are explicitly enabled or a local account command such as `--login`, `--verify-login`, `--list-accounts`, `--select-account`, or `--logout` is used.
 
 ## Azure Key Vault Integration
 

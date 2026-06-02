@@ -1,7 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { randomUUID } from 'crypto';
 import logger from './logger.js';
+import { auditLog, getUserIdentityForAudit } from './audit-log.js';
 import GraphClient from './graph-client.js';
-import AuthManager from './auth.js';
+import AuthManager, {
+  getEndpointRequiredScopes,
+  getMissingAllowedScopes,
+  parseAllowedScopes,
+} from './auth.js';
 import { api } from './generated/client.js';
 import { z } from 'zod';
 import { readFileSync } from 'fs';
@@ -137,6 +143,20 @@ interface UtilityTool {
   openWorldHint?: boolean;
 }
 
+interface DisabledToolScope {
+  toolName: string;
+  missingScopes: string[];
+}
+
+function formatDisabledToolsForLog(disabledTools: DisabledToolScope[]): string {
+  const shown = disabledTools
+    .slice(0, 20)
+    .map((tool) => `${tool.toolName} (missing: ${tool.missingScopes.join(', ')})`);
+  const suffix =
+    disabledTools.length > shown.length ? `, ... +${disabledTools.length - shown.length} more` : '';
+  return `${shown.join('; ')}${suffix}`;
+}
+
 export const UTILITY_TOOLS: readonly UtilityTool[] = [
   {
     name: 'parse-teams-url',
@@ -270,6 +290,12 @@ async function executeGraphTool(
   authManager?: AuthManager
 ): Promise<CallToolResult> {
   logger.info(`Tool ${tool.alias} called with params: ${JSON.stringify(params)}`);
+
+  const requestId = randomUUID();
+  const startTime = Date.now();
+  const upn = getUserIdentityForAudit(getRequestTokens()?.accessToken);
+  const httpMethod = tool.method.toUpperCase();
+
   try {
     // Resolve account-specific token if `account` parameter is provided (or auto-resolve for single account).
     // Skip in OAuth/HTTP mode — let the request context drive token selection via GraphClient.
@@ -620,13 +646,35 @@ async function executeGraphTool(
       text: item.text,
     }));
 
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: tool.alias,
+      http_method: httpMethod,
+      status: response.isError ? 'error' : 'success',
+      duration_ms: Date.now() - startTime,
+    });
+
     return {
       content,
       _meta: response._meta,
       isError: response.isError,
     };
   } catch (error) {
+    const err = error as { name?: string; code?: string | number; status?: string | number };
     logger.error(`Error in tool ${tool.alias}: ${(error as Error).message}`);
+    auditLog({
+      event: 'tool.call',
+      request_id: requestId,
+      user_principal_name: upn,
+      tool: tool.alias,
+      http_method: httpMethod,
+      status: 'error',
+      duration_ms: Date.now() - startTime,
+      error_type: err?.name || 'Error',
+      error_code: err?.status ?? err?.code,
+    });
     return {
       content: [
         {
@@ -649,7 +697,8 @@ export function registerGraphTools(
   orgMode: boolean = false,
   authManager?: AuthManager,
   multiAccount: boolean = false,
-  accountNames: string[] = []
+  accountNames: string[] = [],
+  allowedScopesValue?: string
 ): number {
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
@@ -664,6 +713,8 @@ export function registerGraphTools(
   let registeredCount = 0;
   let skippedCount = 0;
   let failedCount = 0;
+  const allowedScopes = parseAllowedScopes(allowedScopesValue);
+  const disabledByAllowedScopes: DisabledToolScope[] = [];
 
   for (const tool of api.endpoints) {
     const endpointConfig = endpointsData.find((e) => e.toolName === tool.alias);
@@ -687,6 +738,17 @@ export function registerGraphTools(
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
       logger.info(`Skipping tool ${tool.alias} - doesn't match filter pattern`);
+      skippedCount++;
+      continue;
+    }
+
+    const requiredScopes = getEndpointRequiredScopes(endpointConfig, orgMode);
+    const missingScopes =
+      allowedScopes !== undefined && !endpointConfig
+        ? ['endpoint scope metadata']
+        : getMissingAllowedScopes(requiredScopes, allowedScopes);
+    if (missingScopes.length > 0) {
+      disabledByAllowedScopes.push({ toolName: tool.alias, missingScopes });
       skippedCount++;
       continue;
     }
@@ -858,6 +920,12 @@ export function registerGraphTools(
     logger.info('Multi-account mode: "account" parameter injected into all tool schemas');
   }
 
+  if (disabledByAllowedScopes.length > 0) {
+    logger.info(
+      `Allowed scopes disabled ${disabledByAllowedScopes.length} Graph tools: ${formatDisabledToolsForLog(disabledByAllowedScopes)}`
+    );
+  }
+
   const utilityCtx: UtilityToolContext = {
     graphClient,
     authManager,
@@ -888,12 +956,15 @@ export function registerGraphTools(
 export function buildToolsRegistry(
   readOnly: boolean,
   orgMode: boolean,
-  enabledToolsRegex?: RegExp
+  enabledToolsRegex?: RegExp,
+  allowedScopesValue?: string,
+  disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = []
 ): Map<string, { tool: (typeof api.endpoints)[0]; config: EndpointConfig | undefined }> {
   const toolsMap = new Map<
     string,
     { tool: (typeof api.endpoints)[0]; config: EndpointConfig | undefined }
   >();
+  const allowedScopes = parseAllowedScopes(allowedScopesValue);
 
   for (const tool of api.endpoints) {
     const endpointConfig = endpointsData.find((e) => e.toolName === tool.alias);
@@ -910,6 +981,18 @@ export function buildToolsRegistry(
     }
 
     if (enabledToolsRegex && !enabledToolsRegex.test(tool.alias)) {
+      continue;
+    }
+
+    const missingScopes =
+      allowedScopes !== undefined && !endpointConfig
+        ? ['endpoint scope metadata']
+        : getMissingAllowedScopes(
+            getEndpointRequiredScopes(endpointConfig, orgMode),
+            allowedScopes
+          );
+    if (missingScopes.length > 0) {
+      disabledByAllowedScopes.push({ toolName: tool.alias, missingScopes });
       continue;
     }
 
@@ -1010,7 +1093,8 @@ export function registerDiscoveryTools(
   authManager?: AuthManager,
   multiAccount: boolean = false,
   accountNames: string[] = [],
-  enabledTools?: string
+  enabledTools?: string,
+  allowedScopesValue?: string
 ): void {
   let enabledToolsRegex: RegExp | undefined;
   if (enabledTools) {
@@ -1024,7 +1108,19 @@ export function registerDiscoveryTools(
     }
   }
 
-  const toolsRegistry = buildToolsRegistry(readOnly, orgMode, enabledToolsRegex);
+  const disabledByAllowedScopes: Array<{ toolName: string; missingScopes: string[] }> = [];
+  const toolsRegistry = buildToolsRegistry(
+    readOnly,
+    orgMode,
+    enabledToolsRegex,
+    allowedScopesValue,
+    disabledByAllowedScopes
+  );
+  if (disabledByAllowedScopes.length > 0) {
+    logger.info(
+      `Discovery mode: allowed scopes disabled ${disabledByAllowedScopes.length} Graph tools: ${formatDisabledToolsForLog(disabledByAllowedScopes)}`
+    );
+  }
   const utilityTools = UTILITY_TOOLS.filter((u) => {
     if (readOnly && !u.readOnlyHint) return false;
     if (enabledToolsRegex && !enabledToolsRegex.test(u.name)) return false;

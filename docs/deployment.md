@@ -18,6 +18,14 @@ MCP Clients (Claude Desktop, Claude Code, Open WebUI, ...)
          Microsoft Graph API
 ```
 
+## Headless stdio auth-cache storage
+
+Production HTTP deployments are stateless: normal Graph requests carry a per-user bearer token, including On-Behalf-Of (`--obo`) deployments, and the server does not store MSAL token state for those requests.
+
+For headless stdio deployments that use local MSAL login (`--login`, `--verify-login`, auth tools, account selection, and regular stdio Graph calls), `MS365_MCP_AUTH_CACHE_COMMAND` can point at an external executable wrapper that stores the MSAL token cache and selected-account metadata in a deployment-approved backing store. The package only defines the provider-neutral command protocol; provider-specific scripts for AWS, Azure, GCP, Redis, databases, or other stores live outside this package.
+
+In HTTP mode, `MS365_MCP_AUTH_CACHE_COMMAND` is skipped at startup and per Graph request unless local auth tools are explicitly enabled with `--enable-auth-tools` or a local account command such as `--login`, `--verify-login`, `--list-accounts`, `--select-account`, `--remove-account`, or `--logout` is invoked.
+
 ## Docker
 
 A `Dockerfile` is included for containerized deployments:
@@ -194,11 +202,14 @@ The client automatically discovers OAuth endpoints and opens a browser for authe
 ## Security Considerations
 
 - **Stateless**: the server does not store tokens — each request carries the user's Bearer token
+- **Account pinning**: `MS365_MCP_EXPECTED_USERNAME` and `MS365_MCP_EXPECTED_HOME_ACCOUNT_ID` protect local MSAL cache flows for headless stdio deployments. In `--http`, `--obo`, or `MS365_MCP_OAUTH_TOKEN` deployments they are warning-only because Graph calls use request-provided tokens.
 - **Admin consent**: grant tenant-wide consent to avoid per-user consent prompts
 - **Managed identity**: use managed identity for Key Vault access (no secrets in environment variables)
 - **Read-only mode**: use `--read-only` to disable all write operations (send, delete, update, create)
 - **Tool filtering**: use `--enabled-tools <regex>` or `--preset <names>` to restrict available tools
 - **CORS**: configure `MS365_MCP_CORS_ORIGIN` to restrict allowed origins (defaults to `http://localhost:3000`); set explicitly when clients run on a different origin
+- **Structured audit log**: enabled by default. Every tool invocation emits one JSON line on stdout (captured by the container platform's log collector) and to `~/.ms-365-mcp-server/logs/audit.log` (mode `0o600`) with `{ event, request_id, user_principal_name, tool, http_method, status, duration_ms, error_type?, error_code? }`. The schema is intentionally narrow — tool parameters and Graph response bodies are NEVER recorded, and error messages are reduced to `error_type` / `error_code` so upstream library errors do not leak token fragments or query-string PII. Forms the "who accessed what, when" trail required for GDPR / HIPAA / PIPEDA / SOC 2 audit. Opt-out: `MS365_MCP_AUDIT_LOG=false`
+- **Graph resilience**: every call to Microsoft Graph is wrapped with a fetch timeout (default 100 s via `MS365_MCP_GRAPH_TIMEOUT_MS`), retry-with-backoff on 429 / 503 / 504 / network errors (default 3 retries, full-jitter exponential backoff, honours `Retry-After`; 503 / 504 / network errors only retried for idempotent methods, 429 retried on all methods), and a process-wide circuit breaker that opens after 5 consecutive failures and cools down for 30 s (`MS365_MCP_GRAPH_CIRCUIT_THRESHOLD` / `MS365_MCP_GRAPH_CIRCUIT_COOLDOWN_MS`). Disable the breaker for trusted automation: `MS365_MCP_GRAPH_CIRCUIT_DISABLED=true`
 
 ## Exposed Endpoints
 
