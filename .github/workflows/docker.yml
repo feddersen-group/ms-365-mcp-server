@@ -73,7 +73,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trivy scan (report to Security tab)
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:scan
           format: sarif
@@ -89,7 +89,7 @@ jobs:
           category: trivy-image
 
       - name: Fail on fixable CRITICAL findings
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:scan
           format: table

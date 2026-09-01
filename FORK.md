@@ -19,12 +19,12 @@ review of upstream's diff rather than a merge exercise.
 
 Fork-owned files, and the complete delta against upstream:
 
-| Path | Purpose |
-|---|---|
-| `FORK.md` | this document |
-| `.fork/upstream-version` | the upstream release the current `main` corresponds to |
-| `.github/workflows/docker.yml` | build, scan and publish the image |
-| `.github/workflows/upstream-sync.yml` | weekly upstream merge as a pull request |
+| Path                                  | Purpose                                                |
+| ------------------------------------- | ------------------------------------------------------ |
+| `FORK.md`                             | this document                                          |
+| `.fork/upstream-version`              | the upstream release the current `main` corresponds to |
+| `.github/workflows/docker.yml`        | build, scan and publish the image                      |
+| `.github/workflows/upstream-sync.yml` | weekly upstream merge as a pull request                |
 
 Everything else is upstream's, byte for byte. `git diff upstream/main main --stat`
 should list only the files above. If it lists anything else, the invariant has been
