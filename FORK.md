@@ -63,6 +63,13 @@ gh workflow disable Release
 for example `0.148.1`. The sync workflow updates it from `git describe` against the
 upstream tags, so the version bump is visible in the sync pull request.
 
+Upstream leaves `package.json` at `0.0.0-development` and lets semantic-release fill it
+in when it publishes. We do not run semantic-release, so the build stamps the pinned
+version into `package.json` and `package-lock.json` in the CI workspace before building.
+`src/version.ts` reads `package.json` at runtime and the release stage copies it into
+the image, so `--version` inside the container matches the image tag. The stamp only
+ever touches the CI workspace, never a commit, so the invariant holds.
+
 `docker.yml` reads that file and publishes to
 `ghcr.io/feddersen-group/ms-365-mcp-server` as:
 
@@ -77,6 +84,11 @@ commit, which does not contain `docker.yml`, so a tag-triggered build could not 
 
 The image is deployed via Portainer. Pin `<upstream-version>` rather than `latest`, so
 a sync does not change a running deployment without a deliberate step.
+
+It is built for `linux/amd64` and `linux/arm64`, so it runs on either kind of VM. The
+arm64 build runs under QEMU emulation on an x86 runner, which is the bulk of the build
+time. If arm64 is ever known to be unnecessary, dropping it from `PLATFORMS` in
+`docker.yml` roughly halves the pipeline.
 
 GHCR packages pushed by `GITHUB_TOKEN` are created **private**, even from a public
 repository. The first push therefore produces a package Portainer cannot pull
@@ -126,15 +138,23 @@ Then apply one of the four options above and note it in this document.
   Dockerfile installs with `--omit=dev`, so dev-only advisories cannot reach the image
   and must not block it. The full audit, dev dependencies included, runs alongside as
   a report in the job summary.
-- Trivy scans the built image. Fixable `CRITICAL` findings fail the build. Every
+- Trivy scans the built image, once per target platform. Fixable `CRITICAL` findings
+  fail the build on either platform. Every
   fixable finding, at any severity, is uploaded as SARIF to the repository Security
   tab for triage. Note that `trivy-action` ignores its `severity` input when writing
   SARIF unless `limit-severities-for-sarif` is set, and that GitHub re-buckets Trivy's
   severities by CVSS score, so the counts in the Security tab will not match Trivy's
   own labels.
 
-The image is built once for scanning and only pushed if the scan passes, so an image
-that failed a gate never reaches the registry.
+Each platform is built and scanned in its own job, and the `push` job only runs once
+every one of them passed, so an image that failed a gate never reaches the registry.
+buildx can only load one platform into the docker daemon at a time, which is why this
+is a matrix rather than a single multi-platform build. The push reuses the layers the
+scan jobs left in the buildx cache.
+
+SARIF is uploaded from `linux/amd64` only. The findings are the same packages on both
+platforms, and uploading twice would double every alert in the Security tab. Both
+platforms are still gated.
 
 ## Known findings
 
