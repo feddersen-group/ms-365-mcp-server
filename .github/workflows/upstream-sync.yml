@@ -1,0 +1,102 @@
+name: Upstream sync
+
+# Fork-owned workflow. Merges Softeria/ms-365-mcp-server into a branch and opens
+# a PR, so every upstream change is reviewed as a diff before it reaches main.
+# See FORK.md.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM: https://github.com/Softeria/ms-365-mcp-server.git
+  SYNC_BRANCH: sync/upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # A PAT lets the resulting PR trigger the Docker workflow. With the
+          # default GITHUB_TOKEN the PR is still opened, but its checks only run
+          # once the PR is merged into main.
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch upstream main --tags --force
+
+      - name: Merge upstream into sync branch
+        id: merge
+        run: |
+          git checkout -B "$SYNC_BRANCH" origin/main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already contains upstream/main, nothing to sync"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge upstream/main --no-edit; then
+            git merge --abort
+            echo "::error::Merge conflict with upstream. The fork must only ADD files, never edit upstream-owned ones. See FORK.md for how to resolve and restore the invariant."
+            exit 1
+          fi
+
+          VERSION=$(git describe --tags --abbrev=0 upstream/main | sed 's/^v//')
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Unexpected upstream version '$VERSION'" && exit 1 ;;
+          esac
+
+          PREVIOUS=$(tr -d '[:space:]' < .fork/upstream-version)
+          printf '%s\n' "$VERSION" > .fork/upstream-version
+          if ! git diff --quiet .fork/upstream-version; then
+            git commit -q -m "chore(fork): pin upstream version $VERSION" .fork/upstream-version
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "previous=$PREVIOUS" >> "$GITHUB_OUTPUT"
+
+      - name: Push sync branch
+        if: steps.merge.outputs.changed == 'true'
+        run: git push --force origin "$SYNC_BRANCH"
+
+      - name: Open or update pull request
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.merge.outputs.version }}
+          PREVIOUS: ${{ steps.merge.outputs.previous }}
+        run: |
+          BODY=$(cat <<EOF
+          Automated merge of \`Softeria/ms-365-mcp-server@main\` into this fork.
+
+          Upstream version: \`$PREVIOUS\` -> \`$VERSION\`
+
+          Review the diff, then merge. The Docker workflow builds the image,
+          runs \`npm audit --omit=dev\` and scans it with Trivy before pushing
+          to GHCR as \`$VERSION\`.
+          EOF
+          )
+          if [ -z "$(gh pr list --head "$SYNC_BRANCH" --state open --json number -q '.[].number')" ]; then
+            gh pr create --base main --head "$SYNC_BRANCH" \
+              --title "chore(fork): sync upstream $VERSION" --body "$BODY"
+          else
+            gh pr edit "$SYNC_BRANCH" \
+              --title "chore(fork): sync upstream $VERSION" --body "$BODY"
+          fi

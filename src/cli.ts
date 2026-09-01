@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { getCombinedPresetPattern, listPresets, presetRequiresOrgMode } from './tool-categories.js';
+import { assertSignoffMarkersVisible } from './lib/message-signoff.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJsonPath = path.join(__dirname, '..', 'package.json');
@@ -32,6 +33,15 @@ program
   )
   .option('--read-only', 'Start server in read-only mode, disabling write operations')
   .option(
+    '--message-signoff-prefix <text>',
+    'Signoff prepended to outgoing messages (Teams sends, replies and edits; mail sends and drafts) so recipients can tell they were agent-sent, e.g. 🤖 (default: none). Equivalent env var: MS365_MCP_MESSAGE_SIGNOFF_PREFIX.'
+  )
+  .option(
+    '--message-signoff-suffix <text>',
+    'Signoff appended to outgoing messages (default: none). Equivalent env var: MS365_MCP_MESSAGE_SIGNOFF_SUFFIX.'
+  )
+  .option('--no-message-signoff', 'Disable both message signoffs, overriding the env vars.')
+  .option(
     '--http [address]',
     'Use Streamable HTTP transport instead of stdio. Format: [host:]port (e.g., "localhost:3000", ":3000", "3000"). Default: all interfaces on port 3000'
   )
@@ -48,8 +58,12 @@ program
     'Limit exposed tools to Graph scopes covered by this whitespace-separated allowlist'
   )
   .option(
+    '--extra-scopes <scopes>',
+    'Append additional Graph scopes (whitespace-separated) to the token request, beyond those derived from enabled tools. Use with your own app registration (MS365_MCP_CLIENT_ID/SECRET) to request scopes the default app does not declare, then call the endpoints via graph-batch.'
+  )
+  .option(
     '--preset <names>',
-    'Use preset tool categories (comma-separated). Available: mail, calendar, files, personal, work, excel, contacts, tasks, onenote, search, users, all'
+    'Use preset tool categories (comma-separated). Available: mail, calendar, files, personal, work, excel, contacts, tasks, onenote, search, users, outlook, onedrive, teams, teams-write, all'
   )
   .option('--list-presets', 'List all available presets and exit')
   .option('--list-permissions', 'List all required Graph API permissions and exit')
@@ -68,7 +82,7 @@ program
   )
   .option(
     '--no-dynamic-registration',
-    'Disable OAuth Dynamic Client Registration endpoint in HTTP mode'
+    'Disable OAuth Dynamic Client Registration endpoint in HTTP mode. Equivalent env var: MS365_MCP_DISABLE_DCR=true.'
   )
   .option(
     '--auth-browser',
@@ -85,6 +99,10 @@ program
   .option(
     '--trust-proxy-auth',
     'In HTTP mode, skip the built-in Bearer-token check on /mcp and ignore any forwarded Authorization header. All callers share the locally cached MSAL identity (same path stdio mode uses). Use only when an upstream reverse proxy has already authenticated the caller.'
+  )
+  .option(
+    '--allow-unauthenticated-discovery',
+    'In HTTP mode, allow MCP discovery requests (initialize, tools/list, prompts/list, resources/list, ping) without a bearer token, so a gateway can enumerate the tool catalog before any user has authenticated. Non-discovery requests (e.g. tools/call) still require a token. Off by default.'
   )
   .addOption(
     // DEPRECATED: kept only so existing deployments that set --base-url or
@@ -104,10 +122,14 @@ export interface CommandOptions {
   expectedUsername?: string;
   expectedHomeAccountId?: string;
   readOnly?: boolean;
+  messageSignoff?: boolean;
+  messageSignoffSuffix?: string;
+  messageSignoffPrefix?: string;
   http?: string | boolean;
   enableAuthTools?: boolean;
   enabledTools?: string;
   allowedScopes?: string;
+  extraScopes?: string;
   preset?: string;
   listPresets?: boolean;
   listPermissions?: boolean;
@@ -122,6 +144,7 @@ export interface CommandOptions {
   authBrowser?: boolean;
   obo?: boolean;
   trustProxyAuth?: boolean;
+  allowUnauthenticatedDiscovery?: boolean;
   publicUrl?: string;
   /** @deprecated use publicUrl */
   baseUrl?: string;
@@ -132,6 +155,21 @@ export interface CommandOptions {
 export function parseArgs(): CommandOptions {
   program.parse();
   const options = program.opts();
+
+  // Fold the signoff flags into the env vars that lib/message-signoff.ts reads at send time
+  if (typeof options.messageSignoffSuffix === 'string') {
+    process.env.MS365_MCP_MESSAGE_SIGNOFF_SUFFIX = options.messageSignoffSuffix;
+  }
+  if (typeof options.messageSignoffPrefix === 'string') {
+    process.env.MS365_MCP_MESSAGE_SIGNOFF_PREFIX = options.messageSignoffPrefix;
+  }
+  if (options.messageSignoff === false) {
+    process.env.MS365_MCP_MESSAGE_SIGNOFF_SUFFIX = '';
+    process.env.MS365_MCP_MESSAGE_SIGNOFF_PREFIX = '';
+  }
+  // Markup in a marker is allowed (e.g. a coloured <span>), but refuse to start
+  // with one that renders as empty text - html sends would look unsigned.
+  assertSignoffMarkersVisible();
 
   if (options.listPresets) {
     const presets = listPresets();
@@ -172,6 +210,18 @@ export function parseArgs(): CommandOptions {
     console.error(
       'Error: --allowed-scopes / MS365_MCP_ALLOWED_SCOPES was provided but is empty. ' +
         'Provide one or more whitespace-separated scopes, or omit it to use tool-derived scopes.'
+    );
+    process.exit(1);
+  }
+
+  if (options.extraScopes === undefined && process.env.MS365_MCP_EXTRA_SCOPES !== undefined) {
+    options.extraScopes = process.env.MS365_MCP_EXTRA_SCOPES;
+  }
+
+  if (options.extraScopes !== undefined && options.extraScopes.trim() === '') {
+    console.error(
+      'Error: --extra-scopes / MS365_MCP_EXTRA_SCOPES was provided but is empty. ' +
+        'Provide one or more whitespace-separated scopes, or omit it.'
     );
     process.exit(1);
   }
@@ -247,10 +297,15 @@ export function parseArgs(): CommandOptions {
     options.toon = true;
   }
 
-  // Dynamic registration defaults to true in HTTP mode
-  // --enable-dynamic-registration (backwards compat) or --no-dynamic-registration to override
+  // Dynamic registration defaults to true in HTTP mode.
+  // CLI flags `--enable-dynamic-registration` / `--no-dynamic-registration` take
+  // precedence; otherwise `MS365_MCP_DISABLE_DCR=true|1` opts the deployment out
+  // (allows env-var-only configuration in container platforms without modifying
+  // process args).
   if (options.http) {
-    if (options.dynamicRegistration === false) {
+    const dcrDisabledByEnv =
+      process.env.MS365_MCP_DISABLE_DCR === 'true' || process.env.MS365_MCP_DISABLE_DCR === '1';
+    if (options.dynamicRegistration === false || dcrDisabledByEnv) {
       options.enableDynamicRegistration = false;
     } else {
       options.enableDynamicRegistration = true;
@@ -266,6 +321,13 @@ export function parseArgs(): CommandOptions {
     process.env.MS365_MCP_TRUST_PROXY_AUTH === '1'
   ) {
     options.trustProxyAuth = true;
+  }
+
+  if (
+    process.env.MS365_MCP_ALLOW_UNAUTHENTICATED_DISCOVERY === 'true' ||
+    process.env.MS365_MCP_ALLOW_UNAUTHENTICATED_DISCOVERY === '1'
+  ) {
+    options.allowUnauthenticatedDiscovery = true;
   }
 
   // Handle cloud type - CLI option takes precedence over environment variable

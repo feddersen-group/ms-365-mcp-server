@@ -53,8 +53,11 @@ describe('buildScopesFromEndpoints', () => {
   describe('org-mode + read-only + "search|query" filter', () => {
     const scopes = buildScopesFromEndpoints(true, 'search|query', true);
 
-    it('excludes Mail.Read (only the POST search-query endpoint needs it)', () => {
-      expect(scopes).not.toContain('Mail.Read');
+    it('includes Mail.Read via the read-only search-query POST, but never Mail.ReadWrite', () => {
+      // search-query is a POST flagged readOnly, so its read scopes (including
+      // Mail.Read) are pulled in even in read-only mode; the ReadWrite form is
+      // still collapsed away because no write endpoint survives the filter.
+      expect(scopes).toContain('Mail.Read');
       expect(scopes).not.toContain('Mail.ReadWrite');
     });
 
@@ -86,9 +89,15 @@ describe('allowed scope helpers', () => {
 
   describe('resolveAuthScopes', () => {
     it('uses tool-derived scopes when allowed scopes are not supplied', () => {
-      expect(
-        resolveAuthScopes({ orgMode: true, enabledTools: 'search|query', readOnly: true })
-      ).toEqual(buildScopesFromEndpoints(true, 'search|query', true));
+      const resolved = resolveAuthScopes({
+        orgMode: true,
+        enabledTools: 'search|query',
+        readOnly: true,
+      });
+      const derived = buildScopesFromEndpoints(true, 'search|query', true);
+      // resolveAuthScopes sorts its output; buildScopesFromEndpoints preserves
+      // endpoint insertion order. Compare as sets — the scope content is what matters.
+      expect([...resolved].sort()).toEqual([...derived].sort());
     });
 
     it('filters tool-derived scopes when allowed scopes are supplied', () => {
@@ -109,6 +118,39 @@ describe('allowed scope helpers', () => {
       });
 
       expect(scopes).toEqual(['Mail.Read']);
+    });
+
+    it('appends extra scopes to the tool-derived scopes', () => {
+      const base = resolveAuthScopes({ enabledTools: 'list-mail-messages', readOnly: true });
+      const withExtra = resolveAuthScopes({
+        enabledTools: 'list-mail-messages',
+        readOnly: true,
+        extraScopes: 'CopilotPackages.ReadWrite.All',
+      });
+
+      expect(withExtra).toEqual([...base, 'CopilotPackages.ReadWrite.All']);
+    });
+
+    it('appends extra scopes even when an allowed-scopes filter is applied', () => {
+      const scopes = resolveAuthScopes({
+        enabledTools: 'list-mail-messages',
+        allowedScopes: 'Mail.Read',
+        readOnly: true,
+        extraScopes: 'CopilotPackages.ReadWrite.All',
+      });
+
+      expect(scopes).toContain('Mail.Read');
+      expect(scopes).toContain('CopilotPackages.ReadWrite.All');
+    });
+
+    it('deduplicates an extra scope already derived from a tool', () => {
+      const scopes = resolveAuthScopes({
+        enabledTools: 'list-mail-messages',
+        readOnly: true,
+        extraScopes: 'Mail.Read Mail.Read',
+      });
+
+      expect(scopes.filter((s) => s === 'Mail.Read')).toHaveLength(1);
     });
   });
 

@@ -27,7 +27,9 @@ vi.mock('commander', () => {
   }
 
   return {
-    Command: vi.fn(() => commanderMocks.mockCommand),
+    Command: vi.fn(function () {
+      return commanderMocks.mockCommand;
+    }),
     Option: MockOption,
   };
 });
@@ -49,6 +51,7 @@ describe('CLI Module', () => {
     vi.clearAllMocks();
     commanderMocks.mockCommand.opts.mockReturnValue({ file: 'test.xlsx' });
     delete process.env.MS365_MCP_ALLOWED_SCOPES;
+    delete process.env.MS365_MCP_EXTRA_SCOPES;
     delete process.env.MS365_MCP_EXPECTED_USERNAME;
     delete process.env.MS365_MCP_EXPECTED_HOME_ACCOUNT_ID;
     delete process.env.MS365_MCP_AUTH_CACHE_COMMAND;
@@ -56,6 +59,7 @@ describe('CLI Module', () => {
 
   afterEach(() => {
     delete process.env.MS365_MCP_ALLOWED_SCOPES;
+    delete process.env.MS365_MCP_EXTRA_SCOPES;
     delete process.env.MS365_MCP_EXPECTED_USERNAME;
     delete process.env.MS365_MCP_EXPECTED_HOME_ACCOUNT_ID;
     delete process.env.MS365_MCP_AUTH_CACHE_COMMAND;
@@ -111,6 +115,43 @@ describe('CLI Module', () => {
       expect(console.error).toHaveBeenCalledWith(
         expect.stringContaining('MS365_MCP_ALLOWED_SCOPES')
       );
+      expect(process.exit).toHaveBeenCalledWith(1);
+    });
+
+    it('should parse --extra-scopes from CLI options', () => {
+      commanderMocks.mockCommand.opts.mockReturnValue({
+        extraScopes: 'CopilotPackages.ReadWrite.All',
+      });
+
+      const result = parseArgs();
+
+      expect(result.extraScopes).toBe('CopilotPackages.ReadWrite.All');
+    });
+
+    it('should use MS365_MCP_EXTRA_SCOPES as a fallback', () => {
+      process.env.MS365_MCP_EXTRA_SCOPES = 'CopilotPackages.ReadWrite.All';
+      commanderMocks.mockCommand.opts.mockReturnValue({});
+
+      const result = parseArgs();
+
+      expect(result.extraScopes).toBe('CopilotPackages.ReadWrite.All');
+    });
+
+    it('should prefer CLI extra scopes over environment extra scopes', () => {
+      process.env.MS365_MCP_EXTRA_SCOPES = 'Foo.Read';
+      commanderMocks.mockCommand.opts.mockReturnValue({ extraScopes: 'Bar.Read' });
+
+      const result = parseArgs();
+
+      expect(result.extraScopes).toBe('Bar.Read');
+    });
+
+    it('should fail closed when extra scopes are supplied empty', () => {
+      commanderMocks.mockCommand.opts.mockReturnValue({ extraScopes: '   ' });
+
+      parseArgs();
+
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('--extra-scopes'));
       expect(process.exit).toHaveBeenCalledWith(1);
     });
 
@@ -182,6 +223,50 @@ describe('CLI Module', () => {
       expect(optionFlags).not.toContain('--auth-cache-command <command>');
       expect(result).not.toHaveProperty('authCacheCommand');
       expect(result).not.toHaveProperty('authCacheCommandArgs');
+    });
+  });
+
+  describe('Dynamic Client Registration (DCR) — env var override', () => {
+    const prevDisableDcr = process.env.MS365_MCP_DISABLE_DCR;
+
+    afterEach(() => {
+      if (prevDisableDcr === undefined) delete process.env.MS365_MCP_DISABLE_DCR;
+      else process.env.MS365_MCP_DISABLE_DCR = prevDisableDcr;
+    });
+
+    it('enables DCR by default in HTTP mode', () => {
+      delete process.env.MS365_MCP_DISABLE_DCR;
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000' });
+      const result = parseArgs();
+      expect(result.enableDynamicRegistration).toBe(true);
+    });
+
+    it('disables DCR when MS365_MCP_DISABLE_DCR=true', () => {
+      process.env.MS365_MCP_DISABLE_DCR = 'true';
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000' });
+      const result = parseArgs();
+      expect(result.enableDynamicRegistration).toBe(false);
+    });
+
+    it('disables DCR when MS365_MCP_DISABLE_DCR=1', () => {
+      process.env.MS365_MCP_DISABLE_DCR = '1';
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000' });
+      const result = parseArgs();
+      expect(result.enableDynamicRegistration).toBe(false);
+    });
+
+    it('CLI --no-dynamic-registration still wins over env var unset', () => {
+      delete process.env.MS365_MCP_DISABLE_DCR;
+      commanderMocks.mockCommand.opts.mockReturnValue({ http: '3000', dynamicRegistration: false });
+      const result = parseArgs();
+      expect(result.enableDynamicRegistration).toBe(false);
+    });
+
+    it('env var has no effect outside HTTP mode', () => {
+      process.env.MS365_MCP_DISABLE_DCR = 'true';
+      commanderMocks.mockCommand.opts.mockReturnValue({});
+      const result = parseArgs();
+      expect(result.enableDynamicRegistration).toBeUndefined();
     });
   });
 });
