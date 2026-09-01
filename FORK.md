@@ -52,13 +52,13 @@ upstream ships them.
 `Release` (`.github/workflows/release.yml`) runs semantic-release, which publishes to
 npm under upstream's package name.
 
-`Build` (`.github/workflows/build.yml`) runs lint, format, typecheck, build and tests
-across Node 18, 20 and 22, because upstream publishes an npm package declaring
-`engines: >=18`. This fork only ever ships a container on Node 24, so that matrix spent
-three jobs testing runtimes we never deploy. The `verify` job in `docker.yml` runs the
-same checks once, on the version we actually ship. The tradeoff is that a new check
-upstream adds to `build.yml` will not appear here on its own, so glance at that file
-when a sync pull request touches it.
+`Build` (`.github/workflows/build.yml`) runs the checks across Node 18, 20 and 22,
+because upstream publishes an npm package declaring `engines: >=18`. This fork only ever
+ships a container on Node 24, so that matrix spent three jobs testing runtimes we never
+deploy. The `verify` job in `docker.yml` calls upstream's own `npm run verify` script
+once, on the version we actually ship, so a change to what upstream means by verifying
+is picked up automatically. What is not picked up is a change to `build.yml` itself, so
+glance at that file when a sync pull request touches it.
 
 Confirm with `gh workflow list`. After enabling Actions on a fresh clone of this fork,
 disable them again:

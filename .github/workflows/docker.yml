@@ -35,12 +35,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run generate
-      - run: npm run lint
-      - run: npm run format:check
-      - run: npm run typecheck
-      - run: npm run build
-      - run: npm test
+
+      # Upstream's own script: generate, lint, format:check, typecheck, build,
+      # test. Calling it rather than restating the list keeps this in step with
+      # upstream when they change what verifying means.
+      - run: npm run verify
 
       # Gate on what actually ships. The release stage installs with --omit=dev,
       # so dev-only advisories cannot reach the image and must not block the
