@@ -6,10 +6,12 @@ import GraphClient from '../src/graph-client.js';
 vi.mock('../src/logger.js', () => ({
   default: {
     info: vi.fn(),
+    warn: vi.fn(),
     error: vi.fn(),
   },
 }));
 
+vi.mock('../src/generated/client-beta.js', () => ({ api: { endpoints: [] } }));
 vi.mock('../src/generated/client.js', () => ({
   api: {
     endpoints: [
@@ -41,50 +43,46 @@ describe('Tool Filtering', () => {
   let server: McpServer;
   let graphClient: GraphClient;
   let toolSpy: ReturnType<typeof vi.spyOn>;
+  let registerToolSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     server = new McpServer({ name: 'test', version: '1.0.0' });
     graphClient = {} as GraphClient;
     toolSpy = vi.spyOn(server, 'tool').mockImplementation(() => {});
+    registerToolSpy = vi
+      .spyOn(server, 'registerTool')
+      .mockImplementation(() => ({}) as ReturnType<McpServer['registerTool']>);
   });
 
   it('should register all tools when no filter is provided', () => {
     registerGraphTools(server, graphClient, false);
 
-    // 5 mocked endpoints + parse-teams-url + download-bytes utility tools
-    expect(toolSpy).toHaveBeenCalledTimes(7);
-    expect(toolSpy).toHaveBeenCalledWith(
+    // 5 mocked graph endpoints via registerTool; utilities via tool
+    // (parse-teams-url, download-bytes, download-bytes-to-file, get-download-url)
+    expect(registerToolSpy).toHaveBeenCalledTimes(5);
+    expect(toolSpy).toHaveBeenCalledTimes(4);
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'list-mail-messages',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
-    expect(toolSpy).toHaveBeenCalledWith(
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'send-mail',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
-    expect(toolSpy).toHaveBeenCalledWith(
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'list-calendar-events',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
-    expect(toolSpy).toHaveBeenCalledWith(
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'list-excel-worksheets',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
-    expect(toolSpy).toHaveBeenCalledWith(
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'get-current-user',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
@@ -93,18 +91,14 @@ describe('Tool Filtering', () => {
   it('should filter tools by regex pattern - mail only', () => {
     registerGraphTools(server, graphClient, false, 'mail');
 
-    expect(toolSpy).toHaveBeenCalledTimes(2);
-    expect(toolSpy).toHaveBeenCalledWith(
+    expect(registerToolSpy).toHaveBeenCalledTimes(2);
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'list-mail-messages',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
-    expect(toolSpy).toHaveBeenCalledWith(
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'send-mail',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
@@ -113,18 +107,14 @@ describe('Tool Filtering', () => {
   it('should filter tools by regex pattern - calendar or excel', () => {
     registerGraphTools(server, graphClient, false, 'calendar|excel');
 
-    expect(toolSpy).toHaveBeenCalledTimes(2);
-    expect(toolSpy).toHaveBeenCalledWith(
+    expect(registerToolSpy).toHaveBeenCalledTimes(2);
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'list-calendar-events',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
-    expect(toolSpy).toHaveBeenCalledWith(
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'list-excel-worksheets',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
@@ -133,18 +123,17 @@ describe('Tool Filtering', () => {
   it('should handle invalid regex patterns gracefully', () => {
     registerGraphTools(server, graphClient, false, '[invalid regex');
 
-    // 5 mocked endpoints + parse-teams-url + download-bytes (no filter applied on invalid regex)
-    expect(toolSpy).toHaveBeenCalledTimes(7);
+    // 5 mocked endpoints + utilities (no filter applied on invalid regex)
+    expect(registerToolSpy).toHaveBeenCalledTimes(5);
+    expect(toolSpy).toHaveBeenCalledTimes(4);
   });
 
   it('should combine read-only and filtering correctly', () => {
     registerGraphTools(server, graphClient, true, 'mail');
 
-    expect(toolSpy).toHaveBeenCalledTimes(1);
-    expect(toolSpy).toHaveBeenCalledWith(
+    expect(registerToolSpy).toHaveBeenCalledTimes(1);
+    expect(registerToolSpy).toHaveBeenCalledWith(
       'list-mail-messages',
-      expect.any(String),
-      expect.any(Object),
       expect.any(Object),
       expect.any(Function)
     );
@@ -153,6 +142,7 @@ describe('Tool Filtering', () => {
   it('should register no tools when pattern matches nothing', () => {
     registerGraphTools(server, graphClient, false, 'nonexistent');
 
+    expect(registerToolSpy).toHaveBeenCalledTimes(0);
     expect(toolSpy).toHaveBeenCalledTimes(0);
   });
 });

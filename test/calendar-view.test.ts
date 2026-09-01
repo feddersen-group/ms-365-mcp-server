@@ -11,6 +11,7 @@ vi.mock('../src/logger.js', () => ({
   },
 }));
 
+vi.mock('../src/generated/client-beta.js', () => ({ api: { endpoints: [] } }));
 vi.mock('../src/generated/client.js', () => ({
   api: {
     endpoints: [
@@ -64,12 +65,12 @@ vi.mock('../src/generated/client.js', () => ({
 }));
 
 describe('Calendar View Tools', () => {
-  let mockServer: { tool: ReturnType<typeof vi.fn> };
+  let mockServer: { tool: ReturnType<typeof vi.fn>; registerTool: ReturnType<typeof vi.fn> };
   let mockGraphClient: GraphClient;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockServer = { tool: vi.fn() };
+    mockServer = { tool: vi.fn(), registerTool: vi.fn() };
     mockGraphClient = {
       graphRequest: vi.fn().mockResolvedValue({
         content: [{ type: 'text', text: JSON.stringify({ value: [] }) }],
@@ -79,7 +80,7 @@ describe('Calendar View Tools', () => {
 
   function getToolHandler(toolName: string) {
     registerGraphTools(mockServer, mockGraphClient, false);
-    const call = mockServer.tool.mock.calls.find((c: unknown[]) => c[0] === toolName);
+    const call = mockServer.registerTool.mock.calls.find((c: unknown[]) => c[0] === toolName);
     expect(call).toBeDefined();
     return call![call!.length - 1] as (params: Record<string, unknown>) => Promise<unknown>;
   }
@@ -88,7 +89,7 @@ describe('Calendar View Tools', () => {
     it('should register all three calendar view/instances tools', () => {
       registerGraphTools(mockServer, mockGraphClient, false);
 
-      const toolNames = mockServer.tool.mock.calls.map((call: unknown[]) => call[0]);
+      const toolNames = mockServer.registerTool.mock.calls.map((call: unknown[]) => call[0]);
       expect(toolNames).toContain('get-calendar-view');
       expect(toolNames).toContain('get-specific-calendar-view');
       expect(toolNames).toContain('list-calendar-event-instances');
@@ -97,9 +98,10 @@ describe('Calendar View Tools', () => {
     it('should include timezone parameter for calendar view tools', () => {
       registerGraphTools(mockServer, mockGraphClient, false);
 
-      for (const call of mockServer.tool.mock.calls) {
+      for (const call of mockServer.registerTool.mock.calls) {
         const toolName = call[0] as string;
-        const paramSchema = call[2] as Record<string, z.ZodTypeAny>;
+        const paramSchema = (call[1] as { inputSchema: z.AnyZodObject }).inputSchema
+          .shape as Record<string, z.ZodTypeAny>;
 
         if (
           [
@@ -116,9 +118,10 @@ describe('Calendar View Tools', () => {
     it('should include expandExtendedProperties parameter for calendar view tools', () => {
       registerGraphTools(mockServer, mockGraphClient, false);
 
-      for (const call of mockServer.tool.mock.calls) {
+      for (const call of mockServer.registerTool.mock.calls) {
         const toolName = call[0] as string;
-        const paramSchema = call[2] as Record<string, z.ZodTypeAny>;
+        const paramSchema = (call[1] as { inputSchema: z.AnyZodObject }).inputSchema
+          .shape as Record<string, z.ZodTypeAny>;
 
         if (
           [
@@ -135,11 +138,18 @@ describe('Calendar View Tools', () => {
     it('should include fetchAllPages parameter for GET tools', () => {
       registerGraphTools(mockServer, mockGraphClient, false);
 
-      for (const call of mockServer.tool.mock.calls) {
+      for (const call of mockServer.registerTool.mock.calls) {
         const toolName = call[0] as string;
-        // Skip utility tools that are not Graph API endpoints
-        if (toolName === 'parse-teams-url' || toolName === 'download-bytes') continue;
-        const paramSchema = call[2] as Record<string, z.ZodTypeAny>;
+        // Skip utilities and read-only POST query tools that are not GET Graph endpoints.
+        if (
+          toolName === 'parse-teams-url' ||
+          toolName === 'download-bytes' ||
+          toolName === 'copilot-retrieve' ||
+          toolName === 'get-download-url'
+        )
+          continue;
+        const paramSchema = (call[1] as { inputSchema: z.AnyZodObject }).inputSchema
+          .shape as Record<string, z.ZodTypeAny>;
         expect(paramSchema).toHaveProperty('fetchAllPages');
       }
     });
@@ -147,9 +157,9 @@ describe('Calendar View Tools', () => {
     it('should append llmTip to tool descriptions', () => {
       registerGraphTools(mockServer, mockGraphClient, false);
 
-      for (const call of mockServer.tool.mock.calls) {
+      for (const call of mockServer.registerTool.mock.calls) {
         const toolName = call[0] as string;
-        const description = call[1] as string;
+        const description = (call[1] as { description: string }).description;
 
         if (toolName === 'get-calendar-view') {
           expect(description).toContain('TIP:');
