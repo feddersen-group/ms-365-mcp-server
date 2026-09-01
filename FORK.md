@@ -116,8 +116,24 @@ Then apply one of the four options above and note it in this document.
   Dockerfile installs with `--omit=dev`, so dev-only advisories cannot reach the image
   and must not block it. The full audit, dev dependencies included, runs alongside as
   a report in the job summary.
-- Trivy scans the built image. Fixable `CRITICAL` findings fail the build; `HIGH` and
-  `CRITICAL` are uploaded as SARIF to the repository Security tab for triage.
+- Trivy scans the built image. Fixable `CRITICAL` findings fail the build. Every
+  fixable finding, at any severity, is uploaded as SARIF to the repository Security
+  tab for triage. Note that `trivy-action` ignores its `severity` input when writing
+  SARIF unless `limit-severities-for-sarif` is set, and that GitHub re-buckets Trivy's
+  severities by CVSS score, so the counts in the Security tab will not match Trivy's
+  own labels.
 
 The image is built once for scanning and only pushed if the scan passes, so an image
 that failed a gate never reaches the registry.
+
+## Known findings
+
+The scans separate two things that are easy to conflate:
+
+- `npm audit --omit=dev` covers the application's own production dependencies.
+- Trivy covers the whole image, so it also reports the base image: Alpine's OpenSSL
+  and the npm CLI that the `node:*-alpine` images bundle but that this container never
+  runs.
+
+Every Trivy finding measured so far has come from the base image, none from the
+application's dependencies.

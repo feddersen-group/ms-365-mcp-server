@@ -72,13 +72,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # trivy-action ignores 'severity' when generating SARIF unless
+      # limit-severities-for-sarif is set, so the Security tab receives every
+      # fixable finding. That is deliberate here: the tab is for visibility,
+      # the blocking gate below is what stops a release.
       - name: Trivy scan (report to Security tab)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:scan
           format: sarif
           output: trivy.sarif
-          severity: HIGH,CRITICAL
           ignore-unfixed: true
 
       - name: Upload Trivy results
