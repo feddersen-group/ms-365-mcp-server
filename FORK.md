@@ -73,6 +73,16 @@ upstream tags, so the version bump is visible in the sync pull request.
 Upstream tags are deliberately not pushed into this fork. A tag points at an upstream
 commit, which does not contain `docker.yml`, so a tag-triggered build could not run.
 
+## Consuming the image
+
+The image is deployed via Portainer. Pin `<upstream-version>` rather than `latest`, so
+a sync does not change a running deployment without a deliberate step.
+
+GHCR packages pushed by `GITHUB_TOKEN` are created **private**, even from a public
+repository. The first push therefore produces a package Portainer cannot pull
+anonymously. Either set the package to public under Packages -> Package settings, or
+give Portainer a registry credential with a token that has `read:packages`.
+
 ## Syncing
 
 `upstream-sync.yml` runs every Monday at 06:00 UTC, and on demand via
@@ -137,3 +147,12 @@ The scans separate two things that are easy to conflate:
 
 Every Trivy finding measured so far has come from the base image, none from the
 application's dependencies.
+
+These base image findings are knowingly accepted. Clearing them needs three changes to
+the release stage (`node:24-alpine`, `apk --no-cache upgrade`, and deleting the bundled
+npm CLI), which was measured to take the image from 29 fixable findings to 0. The
+`Dockerfile` is upstream's, this image is only deployed internally via Portainer, and
+we would rather keep the zero-delta invariant than carry a patched Dockerfile. Revisit
+if the deployment ever becomes externally reachable.
+
+The `CRITICAL` gate is unaffected by this and still blocks a release.
