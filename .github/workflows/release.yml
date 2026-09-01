@@ -1,7 +1,9 @@
 name: Release
 
 on:
-  workflow_dispatch:  # disabled: replaced by docker.yml
+  push:
+    branches:
+      - main
 
 permissions:
   contents: write
