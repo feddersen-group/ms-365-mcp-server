@@ -46,15 +46,26 @@ Do not edit the upstream file. In order of preference:
 
 ## Disabled upstream workflows
 
-`Release` (`.github/workflows/release.yml`) is disabled in the Actions settings. It
-runs semantic-release, which publishes to npm under upstream's package name. The file
-itself is left exactly as upstream ships it.
+Both are disabled in the Actions settings. The files themselves are left exactly as
+upstream ships them.
+
+`Release` (`.github/workflows/release.yml`) runs semantic-release, which publishes to
+npm under upstream's package name.
+
+`Build` (`.github/workflows/build.yml`) runs lint, format, typecheck, build and tests
+across Node 18, 20 and 22, because upstream publishes an npm package declaring
+`engines: >=18`. This fork only ever ships a container on Node 24, so that matrix spent
+three jobs testing runtimes we never deploy. The `verify` job in `docker.yml` runs the
+same checks once, on the version we actually ship. The tradeoff is that a new check
+upstream adds to `build.yml` will not appear here on its own, so glance at that file
+when a sync pull request touches it.
 
 Confirm with `gh workflow list`. After enabling Actions on a fresh clone of this fork,
-disable it again:
+disable them again:
 
 ```sh
 gh workflow disable Release
+gh workflow disable Build
 ```
 
 ## Versioning
@@ -146,9 +157,9 @@ Then apply one of the four options above and note it in this document.
   severities by CVSS score, so the counts in the Security tab will not match Trivy's
   own labels.
 
-Each platform is built and scanned in its own job, and the `push` job only runs once
-every one of them passed, so an image that failed a gate never reaches the registry.
-buildx can only load one platform into the docker daemon at a time, which is why this
+Each platform is built and scanned in its own job, and the `push` job runs only after
+all of them have passed, so an image that failed a gate never reaches the registry.
+Buildx can load only one platform into the docker daemon at a time, which is why this
 is a matrix rather than a single multi-platform build. The push reuses the layers the
 scan jobs left in the buildx cache.
 

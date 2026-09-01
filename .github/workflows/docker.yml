@@ -22,10 +22,11 @@ env:
   PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
-  # Gate on what actually ships. The release stage installs with --omit=dev, so
-  # dev-only advisories cannot reach the image and must not block the build.
-  # The full audit runs alongside as a report.
-  audit:
+  # Replaces upstream's build.yml, which is disabled here. That workflow runs the
+  # same checks across Node 18, 20 and 22 because upstream publishes an npm
+  # package with engines >=18. This fork only ever ships a container on Node 24,
+  # so three quarters of that matrix tested a runtime we never deploy.
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +34,17 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci --ignore-scripts
+      - run: npm ci
+      - run: npm run generate
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+      # Gate on what actually ships. The release stage installs with --omit=dev,
+      # so dev-only advisories cannot reach the image and must not block the
+      # build. The full audit runs alongside as a report.
       - name: Audit production dependencies (blocking)
         run: npm audit --omit=dev --audit-level=high
       - name: Audit all dependencies (report only)
@@ -50,7 +61,7 @@ jobs:
   # pushed. buildx can only load a single platform into the daemon at a time,
   # which is why this is a matrix rather than one multi-platform build.
   scan:
-    needs: audit
+    needs: verify
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -80,7 +91,7 @@ jobs:
       # 0.0.0-development while its image tag says otherwise. src/version.ts
       # reads package.json at runtime and the release stage copies it in.
       # This only ever touches the CI workspace, never a commit.
-      - name: Stamp the upstream version into package.json
+      - name: Stamp the upstream version into package.json and the lockfile
         env:
           VERSION: ${{ steps.prep.outputs.version }}
         run: |
@@ -153,7 +164,7 @@ jobs:
           esac
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Stamp the upstream version into package.json
+      - name: Stamp the upstream version into package.json and the lockfile
         env:
           VERSION: ${{ steps.upstream.outputs.version }}
         run: |
