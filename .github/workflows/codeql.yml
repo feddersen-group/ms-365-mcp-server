@@ -1,0 +1,57 @@
+name: CodeQL
+
+# Fork-owned workflow. Upstream does not ship this file, so it never conflicts
+# on an upstream sync. See FORK.md.
+#
+# This is the only check that looks at the server's own source code. npm audit
+# and Trivy both answer "do the dependencies have known CVEs", which says
+# nothing about what this code does with a Microsoft Graph token.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Queries improve over time, so re-analyse unchanged code periodically.
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    # A pull request from a fork gets a read-only token, so the upload inside
+    # analyze would fail. This repository takes no external contributions, so
+    # this only avoids a confusing red X if someone ever opens one.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # The Graph client is generated from Microsoft's OpenAPI spec at build
+      # time and is a large part of what actually ships, so it is generated
+      # here rather than analysing only the hand-written sources.
+      - run: npm ci
+      - run: npm run generate
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          # security-extended adds the lower-precision security queries on top
+          # of the default set, including the credential and SSRF data-flow
+          # ones this fork exists to watch.
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: codeql-javascript
