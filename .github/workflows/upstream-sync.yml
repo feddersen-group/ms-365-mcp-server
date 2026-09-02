@@ -57,7 +57,28 @@ jobs:
       - name: Rebuild the fork on top of upstream
         id: sync
         run: |
+          # Lists differences between two refs that are not plain additions,
+          # ignoring anything the fork owns. Runs git into a file rather than a
+          # pipe so a git failure trips `set -e` instead of being swallowed by
+          # the `|| true` that grep would otherwise need.
+          non_additive() {
+            git diff --name-status "$1" "$2" > /tmp/diff.txt
+            awk -v paths="$FORK_PATHS" '
+              BEGIN { n = split(paths, own, " ") }
+              $1 == "A" { next }
+              {
+                for (i = 1; i <= n; i++)
+                  if ($2 == own[i] || index($2, own[i] "/") == 1) next
+                print
+              }
+            ' /tmp/diff.txt
+          }
+
           PREVIOUS=$(tr -d '[:space:]' < .fork/upstream-version)
+          if ! git rev-parse -q --verify "v$PREVIOUS^{commit}" > /dev/null; then
+            echo "::error::Pinned upstream tag v$PREVIOUS does not exist. Was .fork/upstream-version edited by hand?"
+            exit 1
+          fi
 
           VERSION=$(git describe --tags --abbrev=0 upstream/main | sed 's/^v//')
           case "$VERSION" in
@@ -68,9 +89,9 @@ jobs:
           # main must be the pinned upstream release plus fork-owned files and
           # nothing else. If it is not, someone edited a file upstream owns, and
           # rebuilding from upstream would silently discard that edit.
-          DRIFT=$(git diff --name-status "v$PREVIOUS" origin/main | grep -v '^A' || true)
+          DRIFT=$(non_additive "v$PREVIOUS" origin/main)
           if [ -n "$DRIFT" ]; then
-            echo "::error::main differs from upstream v$PREVIOUS in files upstream owns. Rebuilding would discard those edits. See FORK.md."
+            echo "::error::main differs from upstream v$PREVIOUS in files upstream owns. Rebuilding would discard those edits. Either revert them or add the files to FORK_PATHS. See FORK.md."
             echo "$DRIFT"
             exit 1
           fi
@@ -83,11 +104,24 @@ jobs:
           printf '%s\n' "$VERSION" > .fork/upstream-version
           git add -A
 
-          # The result must again be upstream plus fork-owned files only.
-          LEFTOVER=$(git diff --cached --name-status upstream/main | grep -v '^A' || true)
-          if [ -n "$LEFTOVER" ]; then
-            echo "::error::Rebuilt tree is not purely additive against upstream. FORK_PATHS is probably out of date."
-            echo "$LEFTOVER"
+          # No file may vanish except one upstream itself deleted. Since the
+          # drift check above established that main is the pinned upstream
+          # release plus fork-owned files, whatever is left after subtracting
+          # upstream's own deletions is a fork-owned file that FORK_PATHS failed
+          # to restore. Listing FORK_PATHS on both sides instead would be
+          # circular: a path missing from that list would never be looked at.
+          # The staged tree is used because nothing is committed yet.
+          STAGED=$(git write-tree)
+          git ls-tree -r --name-only origin/main | sort > /tmp/before.txt
+          git ls-tree -r --name-only "$STAGED" | sort > /tmp/after.txt
+          git ls-tree -r --name-only "v$PREVIOUS" | sort > /tmp/pinned.txt
+          git ls-tree -r --name-only upstream/main | sort > /tmp/current.txt
+          comm -23 /tmp/before.txt /tmp/after.txt > /tmp/vanished.txt
+          comm -23 /tmp/pinned.txt /tmp/current.txt > /tmp/upstream-deleted.txt
+          MISSING=$(comm -23 /tmp/vanished.txt /tmp/upstream-deleted.txt)
+          if [ -n "$MISSING" ]; then
+            echo "::error::The rebuild dropped files upstream did not delete. FORK_PATHS in this workflow is out of date."
+            echo "$MISSING"
             exit 1
           fi
 

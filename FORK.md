@@ -43,10 +43,11 @@ Do not edit the upstream file. In order of preference:
    one (for example `docker/Dockerfile.fork`) and point our workflow at it, leaving
    upstream's copy untouched.
 4. Only if none of the above work, edit the upstream file, record here why, and add it
-   to `FORK_PATHS` in `upstream-sync.yml`. Until you do, the next sync fails with a
+   to `FORK_PATHS` in `upstream-sync.yml`. Until it is listed, the next sync fails with a
    message naming that file, because rebuilding from upstream would discard the edit.
-   Once it is listed, the fork keeps its version of the file permanently and stops
-   receiving upstream's changes to it, which is its own kind of debt.
+   Once listed, the fork keeps its own version of that file forever and stops receiving
+   upstream's changes to it, including security fixes. That is the debt this option
+   carries, which is why it is last.
 
 ## Disabled upstream workflows
 
@@ -134,14 +135,17 @@ printf '%s\n' "$VERSION" > .fork/upstream-version
 ```
 
 `FORK_PATHS` is defined in the workflow and must list every fork-owned file. Two checks
-guard it:
+guard it, both ignoring anything listed in `FORK_PATHS`:
 
 - Before rebuilding, `main` must differ from the pinned upstream tag by added files only.
-  If someone edited a file upstream owns, rebuilding would silently discard that edit, so
-  the job fails and names the file instead.
-- After rebuilding, the result must again differ from `upstream/main` by added files only.
-  If it does not, `FORK_PATHS` has fallen out of date and a fork-owned file was about to
-  be dropped.
+  If someone edited a file upstream owns without listing it, rebuilding would silently
+  discard that edit, so the job fails and names the file instead.
+- After rebuilding, every fork-owned file that `main` had must still be present. This is
+  checked against `main` rather than against upstream, because a dropped fork file would
+  not show up in a comparison with upstream, which never had it either.
+
+Both run `git diff` into a file rather than through a pipe, so a failing `git` trips
+`set -e` instead of being swallowed by the `|| true` that filtering would otherwise need.
 
 Optional: set an `UPSTREAM_SYNC_TOKEN` repository secret to a fine-grained PAT with
 contents and pull-requests write access. Pull requests opened by the default
