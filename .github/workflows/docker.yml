@@ -111,8 +111,10 @@ jobs:
           output: trivy.sarif
           ignore-unfixed: true
 
+      # Skipped for fork pull requests, which get a read-only token and cannot
+      # write security events.
       - name: Upload Trivy results
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy.sarif

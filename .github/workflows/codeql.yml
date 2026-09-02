@@ -25,6 +25,10 @@ permissions:
 
 jobs:
   analyze:
+    # A pull request from a fork gets a read-only token, so the upload inside
+    # analyze would fail. This repository takes no external contributions, so
+    # this only avoids a confusing red X if someone ever opens one.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
