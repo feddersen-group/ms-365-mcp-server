@@ -23,7 +23,8 @@ Fork-owned files, and the complete delta against upstream:
 | ------------------------------------- | ------------------------------------------------------ |
 | `FORK.md`                             | this document                                          |
 | `.fork/upstream-version`              | the upstream release the current `main` corresponds to |
-| `.github/workflows/docker.yml`        | build, scan and publish the image                      |
+| `.github/workflows/docker.yml`        | verify, build, scan and publish the image              |
+| `.github/workflows/codeql.yml`        | static analysis of the server's own source             |
 | `.github/workflows/upstream-sync.yml` | weekly upstream merge as a pull request                |
 
 Everything else is upstream's, byte for byte. `git diff upstream/main main --stat`
@@ -149,23 +150,20 @@ Then apply one of the four options above and note it in this document.
   Dockerfile installs with `--omit=dev`, so dev-only advisories cannot reach the image
   and must not block it. The full audit, dev dependencies included, runs alongside as
   a report in the job summary.
-- Trivy scans the built image, once per target platform. Fixable `CRITICAL` findings
-  fail the build on either platform. Every
+- Trivy scans the built image. Fixable `CRITICAL` findings fail the build. Every
   fixable finding, at any severity, is uploaded as SARIF to the repository Security
   tab for triage. Note that `trivy-action` ignores its `severity` input when writing
   SARIF unless `limit-severities-for-sarif` is set, and that GitHub re-buckets Trivy's
   severities by CVSS score, so the counts in the Security tab will not match Trivy's
   own labels.
 
-Each platform is built and scanned in its own job, and the `push` job runs only after
-all of them have passed, so an image that failed a gate never reaches the registry.
-Buildx can load only one platform into the docker daemon at a time, which is why this
-is a matrix rather than a single multi-platform build. The push reuses the layers the
-scan jobs left in the buildx cache.
+The image is built and scanned before the `push` job runs, so an image that failed a
+gate never reaches the registry. The push reuses the layers the scan job left in the
+buildx cache.
 
-SARIF is uploaded from `linux/amd64` only. The findings are the same packages on both
-platforms, and uploading twice would double every alert in the Security tab. Both
-platforms are still gated.
+Only `linux/amd64` is scanned. It is the same application on both architectures, built
+from the same package versions, so an arm64 scan would re-report the same advisories
+against architecture-specific builds of them. arm64 is still built and published.
 
 ## Known findings
 
@@ -187,3 +185,39 @@ we would rather keep the zero-delta invariant than carry a patched Dockerfile. R
 if the deployment ever becomes externally reachable.
 
 The `CRITICAL` gate is unaffected by this and still blocks a release.
+
+## What the checks actually cover
+
+Worth being precise about, because the three checks answer different questions and it is
+easy to assume they cover more than they do.
+
+| Check                  | Answers                                      | Does not answer              |
+| ---------------------- | -------------------------------------------- | ---------------------------- |
+| `npm audit --omit=dev` | do the shipped dependencies have known CVEs  | anything about this code     |
+| Trivy                  | do the packages in the image have known CVEs | anything about this code     |
+| CodeQL                 | does this code contain a vulnerable pattern  | whether upstream intended it |
+
+Only CodeQL looks at the server's own source. It runs the `security-extended` query set,
+which includes the data-flow queries that matter here: credentials reaching a log or an
+outbound request, request forgery, and unsafe handling of external input. It analyses the
+generated Graph client too, since that is a large part of what ships.
+
+None of these is a defence against upstream deliberately introducing something malicious.
+The control for that is the sync pull request: every upstream change arrives as a
+reviewable diff rather than as a silent update to a third-party image. That is the main
+reason this fork exists.
+
+For reference, the properties that were verified by hand when this was set up, and that
+are worth re-checking if the relevant code changes:
+
+- The access token is only ever placed in an `Authorization: Bearer` header in
+  `src/graph-client.ts`, and is explicitly redacted from log output.
+- The request URL is built as `${cloudEndpoints.graphApi}/${apiVersion}${endpoint}`, where
+  the host comes from a hardcoded table in `src/cloud-config.ts` that throws on an unknown
+  cloud. The tool-supplied part is a path, so the token cannot be directed at an arbitrary
+  host.
+- The only non-Microsoft host anywhere in the tree is
+  `raw.githubusercontent.com/microsoftgraph/msgraph-metadata`, used by
+  `bin/modules/download-openapi.mjs` at code-generation time. It is not contacted at
+  runtime.
+- There is no telemetry or analytics endpoint in the source.
