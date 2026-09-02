@@ -221,3 +221,49 @@ are worth re-checking if the relevant code changes:
   `bin/modules/download-openapi.mjs` at code-generation time. It is not contacted at
   runtime.
 - There is no telemetry or analytics endpoint in the source.
+
+## CodeQL triage, 2026-09-02
+
+The first full run on `main` produced 27 alerts. None of them is a credential leak. This
+records the reasoning so the Security tab does not have to be re-triaged from scratch,
+and so a genuinely new alert stands out against a known baseline.
+
+**`js/clear-text-logging`, 12 alerts.** All false positives with respect to credentials.
+Four are traced from a `getPassword` call and log only `(error as Error).message` from a
+failed keychain access, or `selectedAccountId`, which is an account identifier rather
+than a token. The other eight are traced from the process environment: six log an error
+message, and the remaining two are the `console.log(JSON.stringify(result))` calls in
+`src/index.ts`, which print the result of `testLogin()`. That returns
+`{ success, message, userData: { displayName, userPrincipalName } }`; the token it
+obtains is only ever used for the `Authorization` header of the `/me` request. No access
+token is written to any sink.
+
+**`js/file-access-to-http`, 1 alert.** The shared `fetch` wrapper in
+`src/lib/graph-resilience.ts`. The "file data" is the endpoint set generated from
+Microsoft's OpenAPI spec, which contributes the path. The host comes from the hardcoded
+table in `src/cloud-config.ts`, so this does not let a request be redirected off Microsoft
+infrastructure.
+
+**`js/user-controlled-bypass`, 1 alert.** The HTTP-mode bearer check in
+`src/lib/microsoft-auth.ts`. The bypass applies only when `allowUnauthenticatedDiscovery`
+is explicitly enabled, and only to requests whose method is in a fixed `DISCOVERY_METHODS`
+set. Deliberate and opt-in, but do not enable that flag on an exposed deployment without
+a reason.
+
+**`js/missing-rate-limiting` (4) and `js/insecure-helmet-configuration` (1).** Both in
+`src/server.ts` and both only reachable in HTTP mode. They are availability and header
+hardening concerns, not exfiltration. They matter only if the HTTP listener is exposed
+beyond the container network.
+
+**`js/regex-injection` (5), `js/incomplete-sanitization` (1), `js/file-system-race` (1),
+`js/http-to-file-access` (1).** The last three are in `bin/` and `remove-recursive-refs.js`,
+which run at code-generation time on Microsoft's own spec, not at runtime.
+
+### Deployment note that no scanner will tell you
+
+`trustProxyAuth` skips the bearer check entirely, on the assumption that a reverse proxy
+in front has already authenticated the caller. Graph access then falls back to the locally
+cached MSAL refresh token. If the HTTP listener is reachable without that proxy actually
+authenticating, anyone who can reach the port can use the cached Microsoft credentials.
+This is a configuration risk rather than a code flaw, and it is the one most worth getting
+right in the Portainer setup.
