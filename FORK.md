@@ -42,8 +42,12 @@ Do not edit the upstream file. In order of preference:
 3. If there is genuinely no other way, add a fork-owned file next to the upstream
    one (for example `docker/Dockerfile.fork`) and point our workflow at it, leaving
    upstream's copy untouched.
-4. Only if none of the above work, edit the upstream file, and record here why. Every
-   such edit is a conflict you will resolve on every future sync, forever.
+4. Only if none of the above work, edit the upstream file, record here why, and add it
+   to `FORK_PATHS` in `upstream-sync.yml`. Until it is listed, the next sync fails with a
+   message naming that file, because rebuilding from upstream would discard the edit.
+   Once listed, the fork keeps its own version of that file forever and stops receiving
+   upstream's changes to it, including security fixes. That is the debt this option
+   carries, which is why it is last.
 
 ## Disabled upstream workflows
 
@@ -110,37 +114,51 @@ give Portainer a registry credential with a token that has `read:packages`.
 ## Syncing
 
 `upstream-sync.yml` runs every Monday at 06:00 UTC, and on demand via
-`gh workflow run "Upstream sync"`. It merges `upstream/main` into `sync/upstream`,
-updates `.fork/upstream-version` and opens a pull request. Review the diff and merge.
+`gh workflow run "Upstream sync"`. It rebuilds this fork on top of the current
+upstream, updates `.fork/upstream-version` and opens a pull request whose diff is
+exactly what changed upstream. Review it, then merge.
+
+It does **not** use `git merge upstream/main`, and that is deliberate. The repository
+ruleset allows squash merges only, so merging a sync pull request leaves no commit with
+upstream as a parent. Git then still treats the original fork point as the merge base
+and replays the whole upstream history on the next sync, conflicting on every file both
+sides have touched since. Measured once: a single new upstream commit produced four
+conflicts. Rebuilding the tree does not depend on ancestry and cannot conflict.
+
+What the job does, in effect:
+
+```sh
+git checkout -B sync/upstream origin/main
+git read-tree -u --reset upstream/main          # tree becomes upstream's, deletions included
+git checkout origin/main -- $FORK_PATHS         # put the fork's own files back
+printf '%s\n' "$VERSION" > .fork/upstream-version
+```
+
+`FORK_PATHS` is defined in the workflow and must list every fork-owned file. Two checks
+guard it, both ignoring anything listed in `FORK_PATHS`:
+
+- Before rebuilding, `main` must differ from the pinned upstream tag by added files only.
+  If someone edited a file upstream owns without listing it, rebuilding would silently
+  discard that edit, so the job fails and names the file instead.
+- After rebuilding, every fork-owned file that `main` had must still be present. This is
+  checked against `main` rather than against upstream, because a dropped fork file would
+  not show up in a comparison with upstream, which never had it either.
+
+Both run `git diff` into a file rather than through a pipe, so a failing `git` trips
+`set -e` instead of being swallowed by the `|| true` that filtering would otherwise need.
 
 Optional: set an `UPSTREAM_SYNC_TOKEN` repository secret to a fine-grained PAT with
 contents and pull-requests write access. Pull requests opened by the default
-`GITHUB_TOKEN` do not trigger other workflows, so without it the Docker build and the
-scans only run after the sync PR is merged, rather than on the PR itself.
+`GITHUB_TOKEN` do not trigger other workflows, so without it the Docker build, the scans
+and CodeQL only run after the sync PR is merged, rather than on the PR itself.
 
-To sync by hand:
+### GitHub will say this fork is behind
 
-```sh
-git fetch upstream --tags
-git checkout -B sync/upstream origin/main
-git merge upstream/main
-printf '%s\n' "$(git describe --tags --abbrev=0 upstream/main | sed 's/^v//')" > .fork/upstream-version
-git commit -m "chore(fork): pin upstream version ..." .fork/upstream-version
-git push -u origin sync/upstream
-```
-
-### If a sync does conflict
-
-It means the invariant was broken. Do not hand-merge and move on, because the same
-conflict returns next week. Instead take upstream's version of the file wholesale and
-re-express the fork's intent in a fork-owned file:
-
-```sh
-git checkout --theirs <the upstream file>
-git add <the upstream file>
-```
-
-Then apply one of the four options above and note it in this document.
+Because no upstream commit is an ancestor of `main`, the repository page shows something
+like "8 commits ahead of and 102 commits behind". That counter measures ancestry, not
+content. What matters is `git diff --name-status upstream/main main`, which lists added
+files only when the fork is up to date. The counter would only go away if merge commits
+were allowed and the sync went back to merging.
 
 ## Security scanning
 
