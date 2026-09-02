@@ -228,14 +228,15 @@ The first full run on `main` produced 27 alerts. None of them is a credential le
 records the reasoning so the Security tab does not have to be re-triaged from scratch,
 and so a genuinely new alert stands out against a known baseline.
 
-**`js/clear-text-logging`, 11 alerts.** All false positives with respect to credentials.
-The four flagged as flowing from `getPassword` log only `(error as Error).message` from a
-failed keychain call, or `selectedAccountId`, which is an account identifier rather than a
-token. The seven flagged as flowing from the process environment log error messages. The
-two `console.log(JSON.stringify(result))` calls in `src/index.ts` print the result of
-`testLogin()`, which returns `{ success, message, userData: { displayName,
-userPrincipalName } }`; the token it obtains is only ever used for the
-`Authorization` header of the `/me` request. No access token is written to any sink.
+**`js/clear-text-logging`, 12 alerts.** All false positives with respect to credentials.
+Four are traced from a `getPassword` call and log only `(error as Error).message` from a
+failed keychain access, or `selectedAccountId`, which is an account identifier rather
+than a token. The other eight are traced from the process environment: six log an error
+message, and the remaining two are the `console.log(JSON.stringify(result))` calls in
+`src/index.ts`, which print the result of `testLogin()`. That returns
+`{ success, message, userData: { displayName, userPrincipalName } }`; the token it
+obtains is only ever used for the `Authorization` header of the `/me` request. No access
+token is written to any sink.
 
 **`js/file-access-to-http`, 1 alert.** The shared `fetch` wrapper in
 `src/lib/graph-resilience.ts`. The "file data" is the endpoint set generated from
