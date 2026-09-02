@@ -147,10 +147,32 @@ guard it, both ignoring anything listed in `FORK_PATHS`:
 Both run `git diff` into a file rather than through a pipe, so a failing `git` trips
 `set -e` instead of being swallowed by the `|| true` that filtering would otherwise need.
 
-Optional: set an `UPSTREAM_SYNC_TOKEN` repository secret to a fine-grained PAT with
-contents and pull-requests write access. Pull requests opened by the default
-`GITHUB_TOKEN` do not trigger other workflows, so without it the Docker build, the scans
-and CodeQL only run after the sync PR is merged, rather than on the PR itself.
+### The `UPSTREAM_SYNC_TOKEN` secret
+
+Set this. Without it the job pushes the branch and then fails, because GitHub refuses
+pull request creation by `GITHUB_TOKEN` unless the repository enables "Allow GitHub
+Actions to create and approve pull requests" under Settings -> Actions -> General, and
+that setting needs repository admin. The failure is deliberate and prints a compare link
+so the pull request can still be opened by hand in one click, but that is a workaround,
+not the intended flow.
+
+A fine-grained personal access token carries the rights of whoever creates it, so
+repository write access is enough and no admin is involved. It also fixes a second
+problem: pull requests opened by `GITHUB_TOKEN` do not trigger other workflows, so
+without the secret `verify`, `scan` and `analyze` would only run after a sync PR is
+merged rather than on the PR itself.
+
+1. Create a fine-grained PAT at Settings -> Developer settings -> Personal access tokens,
+   scoped to this repository only, with **Contents: read and write** and **Pull requests:
+   read and write**.
+2. Store it, without pasting it anywhere else:
+
+   ```sh
+   gh secret set UPSTREAM_SYNC_TOKEN --repo feddersen-group/ms-365-mcp-server
+   ```
+
+Fine-grained tokens expire. When the sync starts failing at the pull request step again,
+check the token's expiry date first.
 
 ### GitHub will say this fork is behind
 

@@ -163,10 +163,33 @@ jobs:
           analyses the source separately.
           EOF
           )
-          if [ -z "$(gh pr list --head "$SYNC_BRANCH" --state open --json number -q '.[].number')" ]; then
-            gh pr create --base main --head "$SYNC_BRANCH" \
-              --title "chore(fork): sync upstream $VERSION" --body "$BODY"
-          else
+          if [ -n "$(gh pr list --head "$SYNC_BRANCH" --state open --json number -q '.[].number')" ]; then
             gh pr edit "$SYNC_BRANCH" \
               --title "chore(fork): sync upstream $VERSION" --body "$BODY"
+            exit 0
           fi
+
+          if gh pr create --base main --head "$SYNC_BRANCH" \
+               --title "chore(fork): sync upstream $VERSION" --body "$BODY" 2> /tmp/pr-error.txt; then
+            exit 0
+          fi
+          cat /tmp/pr-error.txt
+
+          # GitHub refuses pull request creation by GITHUB_TOKEN unless the
+          # repository enables "Allow GitHub Actions to create and approve pull
+          # requests", which needs admin. The branch is pushed either way, so
+          # hand over a link rather than just failing. Setting an
+          # UPSTREAM_SYNC_TOKEN secret removes this entirely; see FORK.md.
+          if grep -q 'not accessible by integration' /tmp/pr-error.txt; then
+            COMPARE="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...$SYNC_BRANCH?expand=1"
+            {
+              echo "## Upstream sync $VERSION is ready"
+              echo
+              echo "Branch \`$SYNC_BRANCH\` is pushed and holds upstream \`$VERSION\`."
+              echo "GitHub Actions may not open the pull request in this repository, so open it here:"
+              echo
+              echo "$COMPARE"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Actions may not create pull requests here. Branch $SYNC_BRANCH is pushed and ready: $COMPARE  Set an UPSTREAM_SYNC_TOKEN secret to remove this step, see FORK.md."
+          fi
+          exit 1
